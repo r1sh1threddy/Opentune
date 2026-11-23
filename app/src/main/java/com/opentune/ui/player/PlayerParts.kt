@@ -1134,7 +1134,7 @@ fun SeekBar(
                 val b = if (durationMs > 0) (buffered().toFloat() / durationMs).coerceIn(0f, 1f) else 0f
                 // Under the wave, the straight track starts where the played part ends: drawn the
                 // whole way along, it showed as a flat line behind the wave.
-                val trackFrom = if (amplitude > 0f && sweep == null) (size.width * f + h * 1.5f * amplitude).coerceAtMost(size.width) else 0f
+                val trackFrom = if (amplitude > 0f && sweep == null) (size.width * f).coerceAtMost(size.width) else 0f
                 if (trackFrom < size.width) drawRoundRect(inactive, Offset(trackFrom, y), Size(size.width - trackFrom, h), r)
                 if (sweep != null) {
                     val at = sweep.value * size.width
@@ -1148,19 +1148,33 @@ fun SeekBar(
                 val bufferedTo = size.width * maxOf(b, f)
                 if (bufferedTo > trackFrom) drawRoundRect(bufferedColor, Offset(trackFrom, y), Size(bufferedTo - trackFrom, h), r)
                 if (amplitude > 0f) {
-                    // Played part as a sine wave, a stroke as thick as the track.
-                    val amp = h * 0.9f * amplitude
-                    val length = h * 7f
-                    val wavePath = Path().apply {
-                        moveTo(0f, size.height / 2)
-                        var x = 0f
-                        while (x <= size.width * f) {
-                            lineTo(x, size.height / 2 + amp * sin(x / length * 2 * PI.toFloat() + (phaseState?.value ?: 0f)))
-                            x += 2f
+                    // Played part as a straight line with thin strands of wave rising off it,
+                    // each its own length, height and speed, so they cross and drift apart.
+                    val played = size.width * f
+                    val paint: Brush = if (gradient) Brush.horizontalGradient(listOf(active, gradientEnd), endX = maxOf(played, 1f))
+                        else androidx.compose.ui.graphics.SolidColor(active)
+                    drawRoundRect(paint, Offset(0f, y), Size(played, h), r)
+                    val phase = phaseState?.value ?: 0f
+                    val mid = size.height / 2
+                    // The strands grow out of the line at the start and settle back into it by the dot.
+                    val rampIn = 10.dp.toPx()
+                    val rampOut = 22.dp.toPx()
+                    WAVE_STRANDS.forEach { s ->
+                        val lift = s.height.dp.toPx() * amplitude
+                        val length = s.length.dp.toPx()
+                        val strand = Path().apply {
+                            moveTo(0f, mid)
+                            var x = 0f
+                            while (x <= played) {
+                                val edge = minOf(x / rampIn, (played - x) / rampOut).coerceIn(0f, 1f)
+                                val ease = edge * edge * (3f - 2f * edge)
+                                val hump = 0.5f - 0.5f * kotlin.math.cos(x / length * 2 * PI.toFloat() - phase * s.speed)
+                                lineTo(x, mid - h / 2f - lift * ease * hump)
+                                x += 2f
+                            }
                         }
+                        drawPath(strand, paint, alpha = s.alpha, style = Stroke(width = s.width.dp.toPx(), cap = StrokeCap.Round))
                     }
-                    if (gradient) drawPath(wavePath, Brush.horizontalGradient(listOf(active, gradientEnd), endX = maxOf(size.width * f, 1f)), style = Stroke(width = h, cap = StrokeCap.Round))
-                    else drawPath(wavePath, active, style = Stroke(width = h, cap = StrokeCap.Round))
                 } else if (lineThumb && thumbRadius > 0.dp) {
                     // Clip the full capsule at the handle instead of rounding the
                     // played segment there. Its outer edge stays round; the join
@@ -1193,6 +1207,8 @@ fun SeekBar(
                         val tall = thumbRadius.toPx() * 2.6f
                         drawRoundRect(thumbColor, Offset(at.x - w / 2f, at.y - tall / 2f), Size(w, tall), CornerRadius(w / 2f))
                     } else {
+                        // While the wave plays, the dot sits in a soft ring of its own colour.
+                        if (amplitude > 0f) drawCircle(thumbColor.copy(alpha = thumbColor.alpha * 0.3f * amplitude), thumbRadius.toPx() * 1.7f, at)
                         drawCircle(thumbColor, thumbRadius.toPx(), at)
                     }
                 }
@@ -1239,7 +1255,20 @@ fun SeekBar(
 @Composable
 private fun rememberWavePhase(): androidx.compose.runtime.State<Float> =
     rememberInfiniteTransition(label = "wave")
-        .animateFloat(0f, (2 * PI).toFloat(), infiniteRepeatable(tween(1_600, easing = LinearEasing)), label = "phase")
+        .animateFloat(0f, (2 * PI).toFloat(), infiniteRepeatable(tween(3_200, easing = LinearEasing)), label = "phase")
+
+/**
+ * One thin strand of the playing seek bar's wave: its hump's [length] and [height] in dp,
+ * stroke [width] in dp, opacity, and [speed] as a whole number of turns per loop of the
+ * phase (whole, so the loop has no seam; negative runs the other way).
+ */
+private class WaveStrand(val length: Float, val height: Float, val width: Float, val alpha: Float, val speed: Int)
+
+private val WAVE_STRANDS = listOf(
+    WaveStrand(length = 46f, height = 9f, width = 1.6f, alpha = 0.9f, speed = 1),
+    WaveStrand(length = 31f, height = 6.5f, width = 1.2f, alpha = 0.55f, speed = 2),
+    WaveStrand(length = 62f, height = 11f, width = 1f, alpha = 0.4f, speed = -1),
+)
 
 /**
  * Now playing, above the dock: a card tinted with the cover's colour, with

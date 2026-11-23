@@ -855,7 +855,6 @@ internal fun LyricLineView(
     val rtl = remember(line) { com.opentune.data.lyrics.readsRightToLeft(line) }
     val origin = when (align) { TextAlign.Center -> 0.5f; TextAlign.End -> if (rtl) 0f else 1f; else -> if (rtl) 1f else 0f }
     val base = lyricsStyle().copy(textAlign = align, textDirection = if (rtl) TextDirection.Rtl else TextDirection.Ltr)
-    val style = if ((motion.glow || ui.lyricsGlow) && isActive) base.copy(shadow = Shadow(bright.copy(alpha = 0.55f), blurRadius = 24f)) else base
     val text = remember(line) { if (line.words.isEmpty()) line.text else line.words.joinToString("") { it.text } }
     val layout = remember(text) { mutableStateOf<TextLayoutResult?>(null) }
     // Where each word sits, worked out once per layout rather than every frame.
@@ -865,6 +864,12 @@ internal fun LyricLineView(
     // Words light one by one only where the source timed them. A line timed as a
     // whole lights all at once, on time, rather than sweeping on guessed word times.
     val sweep = isActive && line.wordSynced && line.words.isNotEmpty()
+    val glowing = (motion.glow || ui.lyricsGlow) && isActive
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    // A close, bright halo behind the words. Where words are timed it shines only behind
+    // the ones already sung, following the singing; a line timed as a whole glows at once.
+    val glowShadow = Shadow(bright.copy(alpha = 0.75f), blurRadius = with(density) { GLOW_RADIUS.toPx() })
+    val style = if (glowing && !sweep) base.copy(shadow = glowShadow) else base
     val cardPad by animateDpAsState(if (picking) 14.dp else 0.dp, tween(220), label = "cardPad")
     Column(
         Modifier
@@ -949,6 +954,18 @@ internal fun LyricLineView(
                 .drawWithCache {
                     val boxes = wordBoxesOf(layout.value, line, text)
                     onDrawWithContent {
+                        val words = layout.value
+                        if (glowing && sweep && words != null) {
+                            // The halo alone, in a layer of its own: the words drawn with their glow,
+                            // the words themselves taken back out, and the glow of words not sung yet
+                            // wiped, so only the sung words shine from behind.
+                            val bleed = GLOW_BLEED.toPx()
+                            drawContext.canvas.saveLayer(Rect(-bleed, -bleed, size.width + bleed, size.height + bleed), androidx.compose.ui.graphics.Paint())
+                            drawText(words, color = bright, shadow = glowShadow)
+                            drawText(words, color = Color.Black, blendMode = BlendMode.DstOut)
+                            sweepGlow(line, boxes, position(), rtl, bleed)
+                            drawContext.canvas.restore()
+                        }
                         drawContent()
                         if (sweep) sweepDim(line, boxes, position(), 0.4f, rtl)
                     }
@@ -978,8 +995,63 @@ internal fun LyricLineView(
     }
 }
 
-/** Room round a line's words for its glow to fade out in (the glow's blur is 24 px). */
+/** Room round a line's words for its glow to fade out in (wider than [GLOW_RADIUS]). */
 private val GLOW_BLEED = 16.dp
+
+/** How far the sung words' glow spreads. */
+private val GLOW_RADIUS = 10.dp
+
+/**
+ * Wipes the glow of [line]'s words not sung yet at [positionMs], with the same soft edge
+ * as [sweepDim]. Where a word sits at the outside of the line (first or last row, a row's
+ * start or end), its wipe reaches [bleed] further out, so none of its glow is left there.
+ */
+private fun DrawScope.sweepGlow(line: LyricLine, boxes: List<List<Rect>>, positionMs: Long, rtl: Boolean, bleed: Float) {
+    val all = boxes.flatten()
+    if (all.isEmpty()) return
+    val top = all.minOf { it.top }
+    val bottom = all.maxOf { it.bottom }
+    // Rows are told apart by where they sit; a row's outer words are its leftmost and rightmost.
+    fun sameRow(a: Rect, b: Rect) = kotlin.math.abs(a.center.y - b.center.y) < a.height / 2f
+    val feather = 26.dp.toPx()
+    line.words.forEachIndexed { i, word ->
+        val pieces = boxes.getOrNull(i) ?: return@forEachIndexed
+        if (pieces.isEmpty()) return@forEachIndexed
+        val span = (word.endMs - word.startMs).coerceAtLeast(1)
+        val t = ((positionMs - word.startMs).toFloat() / span).coerceIn(0f, 1f)
+        if (t >= 1f) return@forEachIndexed
+        val total = pieces.sumOf { it.width.toDouble() }.toFloat().coerceAtLeast(1f)
+        var before = 0f
+        pieces.forEach { box ->
+            val pieceT = ((t * total - before) / box.width.coerceAtLeast(1f)).coerceIn(0f, 1f)
+            before += box.width
+            if (pieceT >= 1f || box.isEmpty) return@forEach
+            val row = all.filter { sameRow(it, box) }
+            val rowStart = if (rtl) row.maxOf { it.right } <= box.right else row.minOf { it.left } >= box.left
+            val left = if (row.minOf { it.left } >= box.left) box.left - bleed else box.left
+            val right = if (row.maxOf { it.right } <= box.right) box.right + bleed else box.right
+            // Next to a sung word, its glow eases out over this rather than stopping in a straight edge.
+            val handover = 8.dp.toPx()
+            val up = if (box.top <= top) box.top - bleed else box.top
+            val down = if (box.bottom >= bottom) box.bottom + bleed else box.bottom
+            val travel = (box.width + feather) * pieceT
+            val litX = if (rtl) box.right - travel else box.left + travel
+            drawRect(
+                brush = when {
+                    // Not reached yet: all of its glow goes, the room round it included.
+                    pieceT <= 0f && rowStart -> androidx.compose.ui.graphics.SolidColor(Color.Black)
+                    pieceT <= 0f && rtl -> Brush.horizontalGradient(0f to Color.Black, 1f to Color.Transparent, startX = box.right - handover, endX = box.right)
+                    pieceT <= 0f -> Brush.horizontalGradient(0f to Color.Transparent, 1f to Color.Black, startX = box.left, endX = box.left + handover)
+                    rtl -> Brush.horizontalGradient(0f to Color.Black, 1f to Color.Transparent, startX = litX, endX = litX + feather)
+                    else -> Brush.horizontalGradient(0f to Color.Transparent, 1f to Color.Black, startX = litX - feather, endX = litX)
+                },
+                topLeft = Offset(left, up),
+                size = Size(right - left, down - up),
+                blendMode = BlendMode.DstOut,
+            )
+        }
+    }
+}
 
 /** Where each of [line]'s words sits in [layout] of [text]: one box per row a word covers, trailing space left out. */
 internal fun wordBoxesOf(layout: TextLayoutResult?, line: LyricLine, text: String): List<List<Rect>> {
