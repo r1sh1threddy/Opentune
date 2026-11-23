@@ -1071,9 +1071,21 @@ fun SeekBar(
     var focused by remember { mutableStateOf(false) }
     val focusRing = MaterialTheme.colorScheme.primary
 
+    // With the wavy bar on, the track is LastWave's (see LastWaveSeekTrack); this bar
+    // keeps the touch, keys, semantics and times. Not while loading: the sweep shows then.
+    val lastWave = wavy && !loading
     Column(modifier) {
         Box {
             if (lyricAt != null) ScrubLyric(dragFraction, durationMs, lyricAt)
+            if (lastWave) LastWaveSeekTrack(
+                fraction = { fraction() },
+                animate = playing,
+                dragging = dragFraction != null,
+                primaryColor = MaterialTheme.colorScheme.primary,
+                secondaryColor = MaterialTheme.colorScheme.secondary,
+                tertiaryColor = MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier.matchParentSize(),
+            )
             Canvas(
                 Modifier
                     .fillMaxWidth()
@@ -1131,6 +1143,7 @@ fun SeekBar(
                 val r = CornerRadius(h / 2)
                 val f = fraction()
                 if (focused) drawRoundRect(focusRing, Offset(-3.dp.toPx(), y - 3.dp.toPx()), Size(size.width + 6.dp.toPx(), h + 6.dp.toPx()), CornerRadius(h / 2 + 3.dp.toPx()), style = Stroke(2.dp.toPx()))
+                if (lastWave) return@Canvas
                 val b = if (durationMs > 0) (buffered().toFloat() / durationMs).coerceIn(0f, 1f) else 0f
                 // Under the wave, the straight track starts where the played part ends: drawn the
                 // whole way along, it showed as a flat line behind the wave.
